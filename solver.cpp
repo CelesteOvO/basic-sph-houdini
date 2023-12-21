@@ -32,6 +32,11 @@ UT_StringHolder DensityAttributeName("density");
 UT_StringHolder PressureAttributeName("pressure");
 UT_StringHolder OneDensityAttributeName("oneOverDensity");
 
+fpreal SPHSolver::_halfH = 0.0;
+fpreal SPHSolver::_kernelValueCoeff = 0.0;
+fpreal SPHSolver::_kernelGradientCoeffA = 0.0;
+fpreal SPHSolver::_kernelGradientCoeffB = 0.0;
+
 const SIM_DopDescription *SPHSolver::GetDescription() {
     static std::array<PRM_Template, 1> PRMS{
             PRM_Template()
@@ -88,6 +93,7 @@ void SPHSolver::init(SIM_Object &obj)
             GA_RWAttributeRef oneOverDensity_ref = gdp.addFloatTuple(GA_ATTRIB_POINT, OneDensityAttributeName, 1, GA_Defaults(0));
         }
     }
+    precomputeKernelCoefficients();
 }
 
 namespace
@@ -222,7 +228,6 @@ void SPHSolver::run(fpreal time, SIM_Object &obj) {
             }
 
             /// 2.computeDensityAndPressure
-            StdKernel poly6(_h);
             // Precompute Taits coefficient
             const fpreal B = (_k * _restDensity) / 7.0;
 
@@ -240,14 +245,14 @@ void SPHSolver::run(fpreal time, SIM_Object &obj) {
 
                 // Add current particle's contribution
 
-                fpreal particle_density = _mass * poly6(0.0);
+                fpreal particle_density = _mass * getKernelValue(0.0);
 
                 // Compute density from neighbors contributions
                 // rho_i = SUM_j (m_j * Wij)
                 for (const auto & neighbor : _neighbors[p])
                 {
                     // Add contribution
-                    particle_density += _mass * poly6(neighbor.dist);
+                    particle_density += _mass * getKernelValue(neighbor.dist);
                 }
 
                 // Precompute 1/rho and compute pressure using Tait's equation:
@@ -270,7 +275,6 @@ void SPHSolver::run(fpreal time, SIM_Object &obj) {
             }
 
             /// 4.computeArtificialViscosityForces
-            SpikyKernel spiky(_h);
             // Precompute coefficients
             const double speedOfSound = sqrt(_k);	// c
             // Compute artificial viscosity forces
@@ -304,7 +308,7 @@ void SPHSolver::run(fpreal time, SIM_Object &obj) {
                         // Compute contribution
                         double avgDensity = 0.5 * (density_handle.get(offset) + density_handle.get(neighborOffset));
                         double IIij = (alpha*uij*speedOfSound + beta*uij*uij) / avgDensity;
-                        UT_Vector3 contribution = spiky.gradient(neighbor.dist, neighbor.xij);
+                        UT_Vector3 contribution = getKernelGradient(neighbor.dist, neighbor.xij);
                         contribution *= IIij;
                         contribution *= _mass;
 
@@ -332,7 +336,7 @@ void SPHSolver::run(fpreal time, SIM_Object &obj) {
                     GA_Offset neighborOffset = gdp.pointOffset(neighbor.id);
 
                     // Compute contribution
-                    UT_Vector3 contribution = spiky.gradient(neighbor.dist, neighbor.xij);
+                    UT_Vector3 contribution = getKernelGradient(neighbor.dist, neighbor.xij);
                     contribution *= (pressure_handle.get(offset) * oneOverDensity_handle.get(offset) * oneOverDensity_handle.get(offset)) +
                                     (pressure_handle.get(neighborOffset) * oneOverDensity_handle.get(neighborOffset) * oneOverDensity_handle.get(neighborOffset));
                     contribution *= -1.0;
