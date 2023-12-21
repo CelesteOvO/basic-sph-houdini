@@ -1,5 +1,7 @@
-project(BasicSPH)
 cmake_minimum_required(VERSION 3.14)
+project(BasicSPHSolverNormal)
+
+set(TARGET BasicSPHSolverNormal)
 
 set(SRC ./src)
 file(GLOB SOURCEFILES ${SRC}/*.cpp ${SRC}/*.h ${SRC}/*.hpp)

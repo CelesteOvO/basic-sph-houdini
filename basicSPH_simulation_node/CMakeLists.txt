@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.26)
-project(fluid-test)
+project(BasicSPHSolverNode)
 
 set(CMAKE_CXX_STANDARD 17)
 
-set(TARGET SPHSolver)
+set(TARGET BasicSPHSolverNode)
 
 # Find Houdini
 set(Houdini_PATH "E:/Program Files/Side Effects Software/Houdini 20.0.506")
