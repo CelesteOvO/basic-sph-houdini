@@ -3,7 +3,6 @@
 //
 
 #include "solver.h"
-#include "sph_kernel.h"
 #include "SpatialGrid.h"
 
 #include <PRM/PRM_Name.h>
@@ -38,7 +37,43 @@ fpreal SPHSolver::_kernelGradientCoeffA = 0.0;
 fpreal SPHSolver::_kernelGradientCoeffB = 0.0;
 
 const SIM_DopDescription *SPHSolver::GetDescription() {
-    static std::array<PRM_Template, 1> PRMS{
+    static PRM_Name volume_min("volume_min", "Volume Min");
+    static std::array<PRM_Default, 3> volume_min_default = {-3, 0, -1};
+
+    static PRM_Name volume_max("volume_max", "Volume Max");
+    static std::array<PRM_Default, 3> volume_max_default = {3, 3, 1};
+
+    static PRM_Name mass("mass", "Mass");
+    static PRM_Default mass_default(1.0);
+
+    static PRM_Name rest_density("rest_density", "Rest Density");
+    static PRM_Default rest_density_default(998.23);
+
+    static PRM_Name pressure_constant("pressure_constant", "Pressure Constant");
+    static PRM_Default pressure_constant_default(100.0);
+
+    static PRM_Name time_step("time_step", "Time Step");
+    static PRM_Default time_step_default(0.005);
+
+    static PRM_Name kernel_radius("kernel_radius", "Kernel Radius");
+    static PRM_Default kernel_radius_default(0.2);
+
+    static PRM_Name bulk_viscosity("bulk_viscosity", "Bulk Viscosity");
+    static PRM_Default bulk_viscosity_default(0.0);
+
+    static PRM_Name shear_viscosity("shear_viscosity", "Shear Viscosity");
+    static PRM_Default shear_viscosity_default(0.0);
+
+    static std::array<PRM_Template, 10> PRMS{
+            PRM_Template(PRM_XYZ_J, 3, &volume_min, volume_min_default.data()),
+            PRM_Template(PRM_XYZ_J, 3, &volume_max, volume_max_default.data()),
+            PRM_Template(PRM_FLT_J, 1, &mass, &mass_default),
+            PRM_Template(PRM_FLT_J, 1, &rest_density, &rest_density_default),
+            PRM_Template(PRM_FLT_J, 1, &pressure_constant, &pressure_constant_default),
+            PRM_Template(PRM_FLT_J, 1, &time_step, &time_step_default),
+            PRM_Template(PRM_FLT_J, 1, &kernel_radius, &kernel_radius_default),
+            PRM_Template(PRM_FLT_J, 1, &bulk_viscosity, &bulk_viscosity_default),
+            PRM_Template(PRM_FLT_J, 1, &shear_viscosity, &shear_viscosity_default),
             PRM_Template()
     };
     static SIM_DopDescription DESC(true,
@@ -67,13 +102,6 @@ SPHSolver::solveSingleObjectSubclass(SIM_Engine &engine, SIM_Object &object, SIM
 void SPHSolver::init(SIM_Object &obj)
 {
     std::cout << "Initializing simulator..." << std::endl;
-    const UT_Vector3 volumeMin(-3,   0, -1);
-    const UT_Vector3 volumeMax( 3,   3,  1);
-    const fpreal mass = 1.0;
-    const fpreal restDensity = 998.23;
-    const fpreal h = 0.2;
-    const fpreal k = 100.0;
-    const fpreal dt = 0.001;
 
     SIM_GeometryCopy *geo;
     geo = SIM_DATA_CREATE(obj, "Geometry", SIM_GeometryCopy,
@@ -104,9 +132,9 @@ namespace
     inline double pow7(double val) { return val*val*val*val*val*val*val; }
 }
 
-void SPHSolver::precomputeKernelCoefficients() {
+void SPHSolver::precomputeKernelCoefficients() const {
     const fpreal PI = 3.14159265359;
-    const fpreal h = 0.2;
+    const fpreal h = getKernelRadius();
 
     _halfH = h/2.0;	// In Monaghan2005, h=half of smoothing radius
 
@@ -137,18 +165,18 @@ void SPHSolver::solve(SIM_Object &obj, const SIM_Time &dt){
 
 void SPHSolver::run(fpreal time, SIM_Object &obj) {
 
-    const double dt = 0.005;
+    const double dt = getTimeStep();
     double timeLeft = time;
 
-    const fpreal _h = 0.2;
-    const UT_Vector3 _volumeMin(-3,   0, -1);
-    const UT_Vector3 _volumeMax( 3,   3,  1);
-    const fpreal _restDensity = 998.23;
-    const fpreal _k = 100.0;
-    const fpreal _mass = 1.0;
+    const fpreal _h = getKernelRadius();
+    const UT_Vector3 _volumeMin = getVolumeMin();
+    const UT_Vector3 _volumeMax = getVolumeMax();
+    const fpreal _restDensity = getRestDensity();
+    const fpreal _k = getPressureConstant();
+    const fpreal _mass = getMass();
 
-    const double alpha = 0.5;	// Bulk viscosity
-    const double beta = 0.0;	// Shear viscosity
+    const double alpha = getBulkViscosity();	// Bulk viscosity
+    const double beta = getShearViscosity();	// Shear viscosity
 
     SIM_GeometryCopy *geo;
     geo = SIM_DATA_CREATE(obj, "Geometry", SIM_GeometryCopy,

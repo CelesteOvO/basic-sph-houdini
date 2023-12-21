@@ -13,6 +13,16 @@
 class SPHSolver : public SIM_SingleSolver, public SIM_OptionsUser
 {
 public:
+    GETSET_DATA_FUNCS_V3("volume_min", VolumeMin);
+    GETSET_DATA_FUNCS_V3("volume_max", VolumeMax);
+    GETSET_DATA_FUNCS_F("mass", Mass);
+    GETSET_DATA_FUNCS_F("rest_density", RestDensity);
+    GETSET_DATA_FUNCS_F("pressure_constant", PressureConstant);
+    GETSET_DATA_FUNCS_F("time_step", TimeStep);
+    GETSET_DATA_FUNCS_F("kernel_radius", KernelRadius);
+
+    GETSET_DATA_FUNCS_F("bulk_viscosity", BulkViscosity);
+    GETSET_DATA_FUNCS_F("shear_viscosity", ShearViscosity);
 private:
     explicit SPHSolver(const SIM_DataFactory *factory) : SIM_SingleSolver(factory), SIM_OptionsUser(this) {}
     ~SPHSolver() override = default;
@@ -29,7 +39,7 @@ protected:
 
     void run(fpreal time, SIM_Object &obj);
 
-    static void precomputeKernelCoefficients();
+    void precomputeKernelCoefficients() const;
 
     static fpreal	_halfH;
     static fpreal	_kernelValueCoeff;

@@ -17,8 +17,6 @@ add_library(
         Entrance.cpp
         solver.cpp
         solver.h
-        sph_kernel.cpp
-        sph_kernel.h
         SpatialGrid.h
         SpatialGrid.hpp
 )
