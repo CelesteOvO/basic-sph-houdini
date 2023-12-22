@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.26)
-project(BasicSPHSolverNode)
+project(PCISPHSolverNode)
 
 set(CMAKE_CXX_STANDARD 17)
 
-set(TARGET BasicSPHSolverNode)
+set(TARGET PCISPHSolver)
 
 # Load Source
 add_library(
@@ -12,6 +12,8 @@ add_library(
         Entrance.cpp
         solver.cpp
         solver.h
+        sph_kernel.cpp
+        sph_kernel.h
         SpatialGrid.h
         SpatialGrid.hpp
 )
