@@ -27,6 +27,11 @@
 #include <array>
 #include <iostream>
 
+fpreal PCISPHSolver::_halfH = 0.0;
+fpreal PCISPHSolver::_kernelValueCoeff = 0.0;
+fpreal PCISPHSolver::_kernelGradientCoeffA = 0.0;
+fpreal PCISPHSolver::_kernelGradientCoeffB = 0.0;
+
 const SIM_DopDescription *PCISPHSolver::GetDescription()
 {
     static std::array<PRM_Template, 1> PRMS{
@@ -73,8 +78,11 @@ void PCISPHSolver::init(SIM_Object &obj) const {
         SIM_GeometryAutoWriteLock lock(geo);
         GU_Detail &gdp = lock.getGdp();
 
-        GA_RWAttributeRef vel_ref = gdp.addFloatTuple(GA_ATTRIB_POINT, gdp.getStdAttributeName(GEO_ATTRIBUTE_VELOCITY), 3, GA_Defaults(0));
-        GA_RWAttributeRef mass_ref = gdp.addFloatTuple(GA_ATTRIB_POINT, "mass", 1, GA_Defaults(0));
+        GA_RWAttributeRef mass_ref = gdp.addFloatTuple(GA_ATTRIB_POINT, gdp.getStdAttributeName(GEO_ATTRIBUTE_MASS), 1, GA_Defaults(0));
+
+        GA_RWAttributeRef vel_ref = gdp.addFloatTuple(GA_ATTRIB_POINT, gdp.getStdAttributeName(GEO_ATTRIBUTE_VELOCITY),
+                                                      3, GA_Defaults(0));
+
         GA_RWAttributeRef density_ref = gdp.addFloatTuple(GA_ATTRIB_POINT, "density", 1, GA_Defaults(0));
         GA_RWAttributeRef pressure_ref = gdp.addFloatTuple(GA_ATTRIB_POINT, "pressure", 1, GA_Defaults(0));
 
@@ -84,158 +92,34 @@ void PCISPHSolver::init(SIM_Object &obj) const {
 
         GA_RWAttributeRef density_error_ref = gdp.addFloatTuple(GA_ATTRIB_POINT, "Derr", 1, GA_Defaults(0));
 
-        GA_RWAttributeRef external_force_ref = gdp.addFloatTuple(GA_ATTRIB_POINT, "eF", 3, GA_Defaults(0));
-        GA_RWAttributeRef pressure_force_ref = gdp.addFloatTuple(GA_ATTRIB_POINT, "pF", 3, GA_Defaults(0));
+        GA_RWAttributeRef external_accel_ref = gdp.addFloatTuple(GA_ATTRIB_POINT, "eA", 3, GA_Defaults(0));
+        GA_RWAttributeRef pressure_accel_ref = gdp.addFloatTuple(GA_ATTRIB_POINT, "pA", 3, GA_Defaults(0));
 
         GA_RWAttributeRef neighbor_num_ref = gdp.addIntTuple(GA_ATTRIB_POINT, "nNum", 1, GA_Defaults(0));
 
-        //////////////////////////////////////////////////////////////////////
-        fpreal radius 			= 0.029;
-        fpreal target_density 	= 1000; // water density
-        fpreal target_spacing 	= radius;
-        fpreal relative_kernel_radius = 1.7;
-        fpreal kernel_radius 		= target_spacing * relative_kernel_radius;
+        //precomputeKernelCoefficients();
 
-        UT_Vector3 volumeMin = UT_Vector3 (-3, 0, -1);
-        UT_Vector3 volumeMax = UT_Vector3 (3, 3, 1);
-        fpreal h = kernel_radius;
-        /////////////////////////////////////////////////////////////////////
-
+        GA_RWHandleF masshandle = gdp.findPointAttribute(gdp.getStdAttributeName(GEO_ATTRIBUTE_MASS));
         GA_RWHandleV3 pos_handle = gdp.findPointAttribute("P");
-        GA_RWHandleF mass_handle = gdp.findPointAttribute(gdp.getStdAttributeName(GEO_ATTRIBUTE_MASS));
+
+        fpreal target_spacing = 0.029;
+        fpreal relative_kernel_radius = 1.7;
+        fpreal kernel_radius = target_spacing * relative_kernel_radius;
+
+        fpreal target_density = 1000.0;
+
+        fpreal h = kernel_radius;
+        fpreal radius = 0.029;
+        UT_Vector3 volumeMin = UT_Vector3 (-0.5, 0, -0.5);
+        UT_Vector3 volumeMax = UT_Vector3 (0.5, 1.5, 0.5);
 
         long long particle_size = gdp.getNumPoints();
 
-        std::vector<std::vector<Neighbor> >	temp_neighbor_list;
-        temp_neighbor_list.resize(particle_size);
-        UT_Vector3 borders(h * 2.0, h * 2.0, h * 2.0);
-        UT_Vector3 gridMin = volumeMin;
-        gridMin -= borders;
-        UT_Vector3 gridMax = volumeMax;
-        gridMax += borders;
-
-        SpatialGrid<long> grid(h, gridMin, gridMax);
-        for (long p = 0; p < particle_size; ++p)
-        {
-            GA_Offset offset = gdp.pointOffset(p);
-            UT_Vector3 pos = pos_handle.get(offset);
-            grid.insert(p, pos);
-        }
-
-        // Use grid to retrieve neighbor particles
-        double h2 = h*h;
-        std::vector<long*> nearbyParticles;
-        for (long p = 0; p < particle_size; ++p)
-        {
-            GA_Offset offset = gdp.pointOffset(p);
-            UT_Vector3 pos = pos_handle.get(offset);
-            // Get nearby particles
-            grid.getElements(pos, h, nearbyParticles);
-
-            // Find particles that are within smoothing radius
-            temp_neighbor_list[p].reserve(50);
-            for (auto & nearbyParticle : nearbyParticles)
-            {
-                long nID = *nearbyParticle;
-                GA_Offset nearbyOffset = gdp.pointOffset(nID);
-                UT_Vector3 nearbyPos = pos_handle.get(nearbyOffset);
-
-                // Skip current particle
-                if (nID==p)
-                    continue;
-
-                UT_Vector3 xij = pos - nearbyPos;
-
-                // Check if distance is lower than smoothing radius
-                double dist2 = xij.dot(xij);
-                if (dist2 < h2)
-                {
-                    // Yup! Add the particle to the neighbors list along with
-                    // some precomputed information
-                    temp_neighbor_list[p].emplace_back(nID, xij, sqrt(dist2));
-                }
-            }
-        }
-
-        StdKernel poly6(kernel_radius);
-        fpreal max_number_density = 0;
-        for (int i = 0; i < particle_size; ++i)
-        {
-            GA_Offset offset = gdp.pointOffset(i);
-
-            fpreal sum = poly6(0); // self density
-            for (const auto &neighbor_point_id: temp_neighbor_list[i])
-            {
-                sum += poly6(neighbor_point_id.dist);
-            }
-            max_number_density = std::max(max_number_density, sum);
-        }
-
-
-        for(long long i = 0; i < particle_size; i++)
-        {
-            GA_Offset offset = gdp.pointOffset(i);
-            if (max_number_density > 0)
-            {
-                fpreal mass = std::max((target_density / max_number_density), 0.0);
-                mass_handle.set(offset, mass);
-            }
-            else
-                throw std::runtime_error("max_number_density is zero");
-        }
-    }
-}
-
-void PCISPHSolver::solve(SIM_Object &obj, const SIM_Time &dt) const {
-    SIM_GeometryCopy *geo;
-    geo = SIM_DATA_GET(obj, "Geometry", SIM_GeometryCopy);
-    if (!geo)
-    {
-        Log.error_nullptr("SOLVE::SIM_GeometryCopy");
-        return;
-    }
-
-    {
-        SIM_GeometryAutoWriteLock lock(geo);
-        GU_Detail &gdp = lock.getGdp();
-
-        GA_RWHandleV3 pos_handle = gdp.findPointAttribute("P");
-        GA_RWHandleV3 vel_handle = gdp.findPointAttribute(gdp.getStdAttributeName(GEO_ATTRIBUTE_VELOCITY));
-        GA_RWHandleF mass_handle = gdp.findPointAttribute("mass");
-        GA_RWHandleF density_handle = gdp.findPointAttribute("density");
-        GA_RWHandleF pressure_handle = gdp.findPointAttribute("pressure");
-
-        GA_RWHandleV3 predict_position_handle = gdp.findPointAttribute("pP");
-        GA_RWHandleV3 predict_velocity_handle = gdp.findPointAttribute("pV");
-        GA_RWHandleF predict_density_handle = gdp.findPointAttribute("pDensity");
-        GA_RWHandleF density_error_handle = gdp.findPointAttribute("Derr");
-
-        GA_RWHandleV3 external_force_handle = gdp.findPointAttribute("eF");
-        GA_RWHandleV3 pressure_force_handle = gdp.findPointAttribute("pF");
-
-        GA_RWHandleI neighbor_num_handle = gdp.findPointAttribute("nNum");
-
-        //////////////////////////////////////////////////////////////////////
-        fpreal radius 			= 0.029;
-        fpreal target_density 	= 1000; // water density
-        fpreal target_spacing 	= radius;
-        fpreal relative_kernel_radius = 1.7;
-        fpreal kernel_radius 		= target_spacing * relative_kernel_radius;
-
-        UT_Vector3 volumeMin = UT_Vector3 (-3, 0, -1);
-        UT_Vector3 volumeMax = UT_Vector3 (3, 3, 1);
-        fpreal h = kernel_radius;
-
-        int iteration = 3;
-        UT_Vector3 gravity(0, -9.81, 0);
-        /////////////////////////////////////////////////////////////////////
-
-        long long particle_size = gdp.getNumPoints();
         /// 1.build Neighbors
-        std::vector<std::vector<Neighbor> >	_neighbors;
+        std::vector<std::vector<Neighbor> >	_temp_neighbors;
         // Reserve space and initialize neighbors' data
-        _neighbors.clear();
-        _neighbors.resize(particle_size);
+        _temp_neighbors.clear();
+        _temp_neighbors.resize(gdp.getNumPoints());
         // Init spatial grid
         UT_Vector3 borders(h*2.0, h*2.0, h*2.0);
         UT_Vector3 gridMin = volumeMin;
@@ -254,10 +138,164 @@ void PCISPHSolver::solve(SIM_Object &obj, const SIM_Time &dt) const {
         double h2 = h*h;
         std::vector<long*> nearbyParticles;
 
-        int neighbor_num = 0;
+        for (long p=0; p<particle_size; ++p)
+        {
+            int neighbor_num = 0;
+            GA_Offset offset = gdp.pointOffset(p);
+            UT_Vector3 pos = pos_handle.get(offset);
+            // Get nearby particles
+            grid.getElements(pos, h, nearbyParticles);
+
+            // Find particles that are within smoothing radius
+            _temp_neighbors[p].reserve(50);
+            for (auto & nearbyParticle : nearbyParticles)
+            {
+                long nID = *nearbyParticle;
+                GA_Offset nearbyOffset = gdp.pointOffset(nID);
+                UT_Vector3 nearbyPos = pos_handle.get(nearbyOffset);
+
+                // Skip current particle
+                if (nID==p)
+                    continue;
+
+                UT_Vector3 xij = pos - nearbyPos;
+
+                // Check if distance is lower than smoothing radius
+                double dist2 = xij.dot(xij);
+                if (dist2 < h2)
+                {
+                    // Yup! Add the particle to the neighbors list along with
+                    // some precomputed information
+                    _temp_neighbors[p].emplace_back(nID, xij, sqrt(dist2));
+                    neighbor_num++;
+                }
+            }
+        }
+
+        StdKernel poly6(kernel_radius);
+        fpreal max_number_density = 0;
+        for(long long i = 0; i < particle_size; i++) {
+            GA_Offset offset = gdp.pointOffset(i);
+            fpreal sum = poly6(0.0);
+            for (const auto & neighbor : _temp_neighbors[i]) {
+                // Add contribution
+                sum += poly6(neighbor.dist);
+            }
+            max_number_density = std::max(max_number_density, sum);
+        }
+
+        if(max_number_density > 0)
+        {
+
+            fpreal mass = target_density / max_number_density;
+            for(long long i = 0; i < particle_size; i++) {
+                GA_Offset offset = gdp.pointOffset(i);
+                masshandle.set(offset, mass);
+            }
+        }
+    }
+}
+
+/*void PCISPHSolver::precomputeKernelCoefficients() const {
+    const fpreal PI = 3.14159265359;
+    const fpreal h = 0.2;
+
+    _halfH = h/2.0;	// In Monaghan2005, h=half of smoothing radius
+
+    // Precompute value coefficient (Identical for part A and B)
+    _kernelValueCoeff = 1.0 / (4.0*PI*pow(_halfH,3));
+
+    // Precompute gradient coefficients
+    _kernelGradientCoeffA = 3.0 / (4.0*PI*pow(_halfH,4));
+    _kernelGradientCoeffB = -3.0 / (4.0*PI*pow(_halfH,4));
+}*/
+
+namespace
+{
+    // This is much faster than calling pow(val, exponent)
+    inline double pow2(double val) { return val*val; }
+    inline double pow3(double val) { return val*val*val; }
+    inline double pow7(double val) { return val*val*val*val*val*val*val; }
+}
+
+void PCISPHSolver::solve(SIM_Object &obj, const SIM_Time &dt) const {
+
+    //////////////////////////////////////////////////////////////////////
+
+    UT_Vector3 volumeMin = UT_Vector3 (-0.5, 0, -0.5);
+    UT_Vector3 volumeMax = UT_Vector3 (0.5, 1.5, 0.5);
+    fpreal radius 			= 0.029;
+
+    fpreal target_spacing 	= radius;
+    fpreal relative_kernel_radius = 1.7;
+    fpreal kernel_radius 		= target_spacing * relative_kernel_radius;
+    fpreal h = kernel_radius;
+    fpreal target_density 	= 1000.0; // water density
+
+    fpreal _dt = 0.002;
+    UT_Vector3 gravity(0, -9.81, 0);
+    /////////////////////////////////////////////////////////////////////
+
+    SIM_GeometryCopy *geo;
+    geo = SIM_DATA_GET(obj, "Geometry", SIM_GeometryCopy);
+    if (!geo)
+    {
+        Log.error_nullptr("SOLVE::SIM_GeometryCopy");
+        return;
+    }
+
+    {
+        SIM_GeometryAutoWriteLock lock(geo);
+        GU_Detail &gdp = lock.getGdp();
+
+        GA_RWHandleV3 pos_handle = gdp.findPointAttribute("P");
+        GA_RWHandleV3 vel_handle = gdp.findPointAttribute(gdp.getStdAttributeName(GEO_ATTRIBUTE_VELOCITY));
+        GA_RWHandleF density_handle = gdp.findPointAttribute("density");
+        GA_RWHandleF pressure_handle = gdp.findPointAttribute("pressure");
+
+        GA_RWHandleV3 predict_position_handle = gdp.findPointAttribute("pP");
+        GA_RWHandleV3 predict_velocity_handle = gdp.findPointAttribute("pV");
+        GA_RWHandleF predict_density_handle = gdp.findPointAttribute("pDensity");
+        GA_RWHandleF density_error_handle = gdp.findPointAttribute("Derr");
+
+        GA_RWHandleV3 external_accel_handle = gdp.findPointAttribute("eA");
+        GA_RWHandleV3 pressure_accel_handle = gdp.findPointAttribute("pA");
+
+        GA_RWHandleI neighbor_num_handle = gdp.findPointAttribute("nNum");
+
+        GA_RWHandleF mass_handle = gdp.findPointAttribute(gdp.getStdAttributeName(GEO_ATTRIBUTE_MASS));
+
+        long long particle_size = gdp.getNumPoints();
+        /// 1.update Neighbors
+        std::vector<std::vector<Neighbor> >	_neighbors;
+        // Reserve space and initialize neighbors' data
+        _neighbors.clear();
+        _neighbors.resize(particle_size);
+        for (long p=0; p<particle_size; ++p)
+        {
+            neighbor_num_handle.set(p, 0);
+        }
+        // Init spatial grid
+        UT_Vector3 borders(h*2.0, h*2.0, h*2.0);
+        UT_Vector3 gridMin = volumeMin;
+        gridMin -= borders;
+        UT_Vector3 gridMax = volumeMax;
+        gridMax += borders;
+        SpatialGrid<long> grid(h, gridMin, gridMax);
+        // Insert particles into grid
+        for (long p = 0; p < particle_size; ++p)
+        {
+            GA_Offset offset = gdp.pointOffset(p);
+            UT_Vector3 pos = pos_handle.get(offset);
+            grid.insert(p, pos);
+        }
+        // Use grid to retrieve neighbor particles
+        double h2 = h*h;
+        std::vector<long*> nearbyParticles;
 
         for (long p=0; p<particle_size; ++p)
         {
+            int neighbor_num = 0;
             GA_Offset offset = gdp.pointOffset(p);
             UT_Vector3 pos = pos_handle.get(offset);
             // Get nearby particles
@@ -295,20 +333,32 @@ void PCISPHSolver::solve(SIM_Object &obj, const SIM_Time &dt) const {
         for(long long i = 0; i < particle_size; i++)
         {
             GA_Offset offset = gdp.pointOffset(i);
-            fpreal sum = mass_handle(offset) * poly6(0); // self density
-            for (const auto &neighbor_point_id: _neighbors[i])
+            density_handle.set(offset, 0.0);
+            fpreal particle_density = mass_handle(offset) * poly6(0.0);
+            for (const auto & neighbor : _neighbors[i])
             {
-                sum += mass_handle(offset) * poly6(neighbor_point_id.dist);
+                fpreal dist = (pos_handle.get(offset) - pos_handle.get(gdp.pointOffset(neighbor.id))).length();
+                particle_density += mass_handle(offset) * poly6(dist);
             }
-            density_handle.set(offset, sum);
+            density_handle.set(offset, particle_density);
         }
 
         /// 3.add external force
         for(long long i = 0; i < particle_size; i++)
         {
             GA_Offset offset = gdp.pointOffset(i);
-            UT_Vector3 external_force = gravity * mass_handle.get(offset);
-            external_force_handle.set(offset, external_force);
+            UT_Vector3 gravity_accel = UT_Vector3(0.0, -9.81, 0.0);
+
+            UT_Vector3 viscosity_accel = UT_Vector3(0.0, 0.0, 0.0);
+            for(const auto & neighbor : _neighbors[i])
+            {
+                GA_Offset neighborOffset = gdp.pointOffset(neighbor.id);
+                fpreal dist = (pos_handle.get(offset) - pos_handle.get(neighborOffset)).length();
+                UT_Vector3 dir = pos_handle.get(offset) - pos_handle.get(neighborOffset);
+                viscosity_accel += 0.5 * (2+2) * 0.01 * (mass_handle(offset) / density_handle.get(neighborOffset) * (vel_handle.get(offset) - vel_handle.get(neighborOffset)).dot(dir)) / (dist * dist + 0.01 * radius * radius) * poly6.cubic_kernel_derivative(dist);
+            }
+            UT_Vector3 external_accel = gravity_accel + viscosity_accel;
+            external_accel_handle.set(offset, external_accel);
         }
 
         /// 4.initialize pressure and pressure force
@@ -316,13 +366,17 @@ void PCISPHSolver::solve(SIM_Object &obj, const SIM_Time &dt) const {
         {
             GA_Offset offset = gdp.pointOffset(i);
             pressure_handle.set(offset, 0);
-            pressure_force_handle.set(offset, UT_Vector3(0, 0, 0));
+            pressure_accel_handle.set(offset, UT_Vector3(0, 0, 0));
             density_error_handle.set(offset, 0);
+            //predict_density_handle.set(offset, density_handle.get(offset));
         }
 
         /// 5.prediction and correction
         int loop = 0;
-        while(loop < iteration)
+        int min_loop = 3;
+        bool density_error_too_large = true;
+        int max_loop = 5;
+        while(((loop < min_loop)||(density_error_too_large)) && (loop < max_loop))
         {
             /// 5.1 predict velocity and position
             for(long long i = 0; i < particle_size; i++)
@@ -331,22 +385,56 @@ void PCISPHSolver::solve(SIM_Object &obj, const SIM_Time &dt) const {
                 UT_Vector3 velocity = vel_handle.get(offset);
                 UT_Vector3 position = pos_handle.get(offset);
 
-                UT_Vector3 predict_velocity = velocity + dt * external_force_handle.get(offset) / mass_handle.get(offset);
+                UT_Vector3 predict_velocity = velocity + dt * external_accel_handle.get(offset) + dt * pressure_accel_handle.get(offset);
                 UT_Vector3 predict_position = position + dt * predict_velocity;
+
+                if(predict_position.x() < volumeMin.x())
+                {
+                    predict_position.x() = volumeMin.x();
+                    predict_velocity.x() = 0.0;
+                }
+                else if(predict_position.x() > volumeMax.x())
+                {
+                    predict_position.x() = volumeMax.x();
+                    predict_velocity.x() = 0.0;
+                }
+                if(predict_position.y() < volumeMin.y())
+                {
+                    predict_position.y() = volumeMin.y();
+                    predict_velocity.y() = 0.0;
+                }
+                else if(predict_position.y() > volumeMax.y())
+                {
+                    predict_position.y() = volumeMax.y();
+                    predict_velocity.y() = 0.0;
+                }
+                if(predict_position.z() < volumeMin.z())
+                {
+                    predict_position.z() = volumeMin.z();
+                    predict_velocity.z() = 0.0;
+                }
+                else if(predict_position.z() > volumeMax.z())
+                {
+                    predict_position.z() = volumeMax.z();
+                    predict_velocity.z() = 0.0;
+                }
 
                 predict_velocity_handle.set(offset, predict_velocity);
                 predict_position_handle.set(offset, predict_position);
             }
 
             /// 5.2 predict density
+            //StdKernel poly6(kernel_radius);
             for(long long i = 0; i < particle_size; i++)
             {
                 GA_Offset offset = gdp.pointOffset(i);
-                fpreal sum = mass_handle.get(offset) * poly6(0); // self density
-                for (const auto &neighbor_point_id: _neighbors[i])
+                fpreal sum = mass_handle(offset) * poly6(0);
+                for (long n = 0; n < _neighbors[i].size(); ++n)
                 {
-                    fpreal predict_dist = (predict_position_handle.get(offset) - predict_position_handle.get(neighbor_point_id.id)).length();
-                    sum += mass_handle.get(offset) * poly6(predict_dist);
+                    const Neighbor &neighbor = _neighbors[i][n];
+                    GA_Offset neighborOffset = gdp.pointOffset(neighbor.id);
+                    fpreal predict_dist = (predict_position_handle.get(offset) - predict_position_handle.get(neighborOffset)).length();
+                    sum += mass_handle(offset) * poly6(predict_dist);
                 }
                 predict_density_handle.set(offset, sum);
             }
@@ -365,8 +453,8 @@ void PCISPHSolver::solve(SIM_Object &obj, const SIM_Time &dt) const {
                     density_error *= 0;
                 }
                 density_error_handle.set(offset, density_error);
-                fpreal last_pressure = pressure_handle.get(offset);
-                fpreal new_pressure = last_pressure + pressure;
+                fpreal new_pressure = pressure_handle.get(offset);
+                new_pressure += pressure;
                 pressure_handle.set(offset, new_pressure);
             }
 
@@ -375,24 +463,49 @@ void PCISPHSolver::solve(SIM_Object &obj, const SIM_Time &dt) const {
             for(long long i = 0; i < particle_size; i++)
             {
                 GA_Offset offset = gdp.pointOffset(i);
-                UT_Vector3 pressure_force = UT_Vector3(0, 0, 0);
-                for (const auto &neighbor_point_id: _neighbors[i])
+                for (long n = 0; n < _neighbors[i].size(); ++n)
                 {
-                    long neighbor_id = neighbor_point_id.id;
-                    GA_Offset neighbor_offset = gdp.pointOffset(neighbor_id);
+                    const Neighbor &neighbor = _neighbors[i][n];
+                    GA_Offset neighborOffset = gdp.pointOffset(neighbor.id);
 
-                    UT_Vector3 neighbor_predict_position = predict_position_handle.get(neighbor_offset);
-                    UT_Vector3 predict_position = predict_position_handle.get(offset);
+                    fpreal predict_dist = (predict_position_handle.get(offset) - predict_position_handle.get(neighborOffset)).length();
+                    if(predict_dist > std::numeric_limits<fpreal>::epsilon() && predict_density_handle.get(neighborOffset) > std::numeric_limits<fpreal>::epsilon())
+                    {
+                        UT_Vector3 predict_dir = (predict_position_handle.get(neighborOffset) - predict_position_handle.get(offset))/predict_dist;
+                        // Compute contribution
+                        UT_Vector3 test1 = spiky.gradient(predict_dist, predict_dir);
+                        fpreal test2 = mass_handle(neighborOffset);
+                        fpreal test3 = pressure_handle.get(neighborOffset);
+                        fpreal test4 = predict_density_handle.get(neighborOffset);
+                        fpreal test5 = pressure_handle.get(offset);
+                        fpreal test6 = predict_density_handle.get(offset);
+                        fpreal test7 = pressure_handle.get(offset) / pow2(predict_density_handle.get(offset));
+                        fpreal test8 = pressure_handle.get(neighborOffset) / pow2(predict_density_handle.get(neighborOffset));
 
-                    fpreal neighbor_pressure = pressure_handle.get(neighbor_offset);
-                    fpreal pressure = pressure_handle.get(offset);
-
-                    UT_Vector3 dir = neighbor_predict_position - predict_position;
-                    fpreal dist = (predict_position - neighbor_predict_position).length();
-                    UT_Vector3 pressure_force_i = -mass_handle.get(offset) * mass_handle.get(neighbor_offset) * (pressure / (predict_position * predict_position) + neighbor_pressure / (neighbor_predict_position * neighbor_predict_position)) * spiky.gradient(dist, dir);
-                    pressure_force += pressure_force_i;
+                        UT_Vector3 contribution = mass_handle(neighborOffset) * (pressure_handle.get(offset) / pow2(predict_density_handle.get(offset)) + pressure_handle.get(neighborOffset) / pow2(predict_density_handle.get(neighborOffset))) * spiky.gradient(predict_dist, predict_dir);
+                        // Add contribution
+                        UT_Vector3 pressure_accel = pressure_accel_handle.get(offset);
+                        pressure_accel -= contribution;
+                        pressure_accel_handle.set(offset, pressure_accel);
+                    }
                 }
-                pressure_force_handle.set(offset, pressure_force);
+            }
+
+            density_error_too_large = false;
+            unsigned int overCount = 0;
+            for(long long i = 0; i < particle_size; i++)
+            {
+                GA_Offset offset = gdp.pointOffset(i);
+                fpreal density_error = density_error_handle.get(offset);
+                if(density_error > 0.01 * target_density)
+                {
+                    overCount++;
+                }
+            }
+
+            if(overCount > 0)
+            {
+                density_error_too_large = true;
             }
 
             loop++;
@@ -405,110 +518,133 @@ void PCISPHSolver::solve(SIM_Object &obj, const SIM_Time &dt) const {
             UT_Vector3 velocity = vel_handle.get(offset);
             UT_Vector3 position = pos_handle.get(offset);
 
-            UT_Vector3 pressure_force = pressure_force_handle.get(offset);
-            UT_Vector3 external_force = external_force_handle.get(offset);
+            UT_Vector3 pressure_accel = pressure_accel_handle.get(offset);
+            UT_Vector3 external_accel = external_accel_handle.get(offset);
 
-            UT_Vector3 correct_velocity = velocity + dt * (pressure_force + external_force) / mass_handle.get(offset);
-            UT_Vector3 correct_position = position + dt * correct_velocity;
+            velocity += dt * (pressure_accel + external_accel);
+            position += dt * velocity;
 
             /// resolve collision
-            if (correct_position.x() < volumeMin.x())
+            if (position.x() < volumeMin.x())
             {
-                correct_position.x() = volumeMin.x();
-                correct_velocity.x() = 0.0;
+                position.x() = volumeMin.x();
+                velocity.x() = 0.0;
             }
-            else if (correct_position.x() > volumeMax.x())
+            else if (position.x() > volumeMax.x())
             {
-                correct_position.x() = volumeMax.x();
-                correct_velocity.x() = 0.0;
+                position.x() = volumeMax.x();
+                velocity.x() = 0.0;
             }
-            if (correct_position.y() < volumeMin.y())
+            if (position.y() < volumeMin.y())
             {
-                correct_position.y() = volumeMin.y();
-                correct_velocity.y() = 0.0;
+                position.y() = volumeMin.y();
+                velocity.y() = 0.0;
             }
-            else if (correct_position.y() > volumeMax.y())
+            else if (position.y() > volumeMax.y())
             {
-                correct_position.y() = volumeMax.y();
-                correct_velocity.y() = 0.0;
+                position.y() = volumeMax.y();
+                velocity.y() = 0.0;
             }
-            if (correct_position.z() < volumeMin.z())
+            if (position.z() < volumeMin.z())
             {
-                correct_position.z() = volumeMin.z();
-                correct_velocity.z() = 0.0;
+                position.z() = volumeMin.z();
+                velocity.z() = 0.0;
             }
-            else if (correct_position.z() > volumeMax.z())
+            else if (position.z() > volumeMax.z())
             {
-                correct_position.z() = volumeMax.z();
-                correct_velocity.z() = 0.0;
+                position.z() = volumeMax.z();
+                velocity.z() = 0.0;
             }
 
-            vel_handle.set(offset, correct_velocity);
-            pos_handle.set(offset, correct_position);
+            vel_handle.set(offset, velocity);
+            pos_handle.set(offset, position);
         }
     }
 }
 
 fpreal PCISPHSolver::_compute_delta(GU_Detail &gdp) const
 {
-    GA_RWHandleF mass_handle = gdp.findPointAttribute(gdp.getStdAttributeName(GEO_ATTRIBUTE_MASS));
-    GA_Offset offset = gdp.pointOffset(0); /// TODO: mass is the same for all fluid particles
-    fpreal mass = mass_handle.get(offset);
+    fpreal mass = 1.0;
 
     //////////////////////////////////////////////////////////////////////
     fpreal radius 			= 0.029;
-    fpreal target_density 	= 1000; // water density
-    fpreal target_spacing 	= radius;
-    fpreal relative_kernel_radius = 1.7;
-    fpreal kernel_radius 		= target_spacing * relative_kernel_radius;
+    fpreal target_density 	= 1000.0; // water density
+    fpreal kernel_radius 		= 0.029 * 1.7;
 
-    UT_Vector3 volumeMin = UT_Vector3 (-3, 0, -1);
-    UT_Vector3 volumeMax = UT_Vector3 (3, 3, 1);
+    UT_Vector3 volumeMin = UT_Vector3 (-0.5, 0, -0.5);
+    UT_Vector3 volumeMax = UT_Vector3 (0.5, 1.5, 0.5);
     fpreal h = kernel_radius;
-
-    int iteration = 3;
-    UT_Vector3 gravity(0, -9.81, 0);
 
     fpreal rest_density = target_density;
     fpreal dt = 0.002;
+
+    GA_RWHandleF mass_handle = gdp.findPointAttribute(gdp.getStdAttributeName(GEO_ATTRIBUTE_MASS));
     /////////////////////////////////////////////////////////////////////
 
-
-    SpikyKernel spiky(kernel_radius);
     UT_Vector3 sumGradW = UT_Vector3(0, 0, 0);
-    fpreal sumGradW2 = 0;
-    const fpreal supportRadius = kernel_radius;
+    fpreal sumGradW2 = 0.0;
+    const float supportRadius = kernel_radius;
     const fpreal diam = static_cast<fpreal>(2.0) * radius;
     const UT_Vector3 xi(0, 0, 0);
-    UT_Vector3 xj = UT_Vector3(-supportRadius, -supportRadius, -supportRadius);
+    UT_Vector3 xj = {-supportRadius, -supportRadius, -supportRadius};
 
-    while(xj.x() <= supportRadius)
+    SpikyKernel spiky(kernel_radius);
+    while(xj[0] <= supportRadius)
     {
-        while (xj.y() <= supportRadius)
+        while (xj[1] <= supportRadius)
         {
-            while (xj.z() <= supportRadius)
+            while (xj[2] <= supportRadius)
             {
                 fpreal dist = (xi - xj).length();
                 if (dist * dist < supportRadius * supportRadius)
                 {
-                    UT_Vector3 dir = (xi - xj) / dist;
+                    UT_Vector3 dir = (xj - xi) / dist;
                     const UT_Vector3 gradW = spiky.gradient(dist, dir);
                     sumGradW += gradW;
                     sumGradW2 += gradW.dot(gradW);
                 }
-                xj.z() += diam;
+                xj[2] += diam;
             }
-            xj.y() += diam;
-            xj.z() = -supportRadius;
+            xj[1] += diam;
+            xj[2] = -supportRadius;
         }
-        xj.x() += diam;
-        xj.y() = -supportRadius;
-        xj.z() = -supportRadius;
+        xj[0] += diam;
+        xj[1] = -supportRadius;
+        xj[2] = -supportRadius;
     }
 
     fpreal denom = -sumGradW.dot(sumGradW) - sumGradW2;
-    fpreal beta = 2 * (mass * dt / rest_density) * (mass * dt / rest_density);
+    fpreal beta = 2 * (mass_handle.get(0) * dt / rest_density) * (mass_handle.get(0) * dt / rest_density);
     return (std::fabs(denom) > 0) ? -1 / (beta * denom) : 0;
 }
 
+/*fpreal PCISPHSolver::getKernelValue(fpreal dist) {
+    fpreal q = dist/_halfH;
+    if (q<1.0)
+    {
+        return _kernelValueCoeff * ( pow3(2.0-q)-4*pow3(1.0-q) );
+    }
+    else
+    {
+        return _kernelValueCoeff * pow3(2.0-q);
+    }
+}
 
+UT_Vector3 PCISPHSolver::getKernelGradient(fpreal dist, const UT_Vector3 &xij) {
+    fpreal q = dist/_halfH;
+    UT_Vector3 gradient = xij;
+    if (q<= 0.0)
+    {
+        gradient = UT_Vector3(0,0,0);
+    }
+    else if (q<1.0)
+    {
+        gradient *= _kernelGradientCoeffA * (4.0 * pow2(1.0-q) - pow2(2.0-q)) / dist;
+    }
+    else
+    {
+        gradient *= (_kernelGradientCoeffB * pow2(2.0 - q)) / dist;
+    }
+
+    return gradient;
+}*/

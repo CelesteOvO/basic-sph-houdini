@@ -25,6 +25,15 @@ protected:
     void init(SIM_Object &obj) const;
     void solve(SIM_Object &obj, const SIM_Time &dt) const;
     fpreal _compute_delta(GU_Detail &gdp) const;
+    /*void precomputeKernelCoefficients() const;
+    static fpreal getKernelValue(fpreal dist) ;
+    static UT_Vector3 getKernelGradient(fpreal dist, const UT_Vector3 &xij) ;*/
+
+    static fpreal	_halfH;
+    static fpreal	_kernelValueCoeff;
+    static fpreal	_kernelGradientCoeffA;
+    static fpreal	_kernelGradientCoeffB;
+    static fpreal   _delta;
 
     struct Neighbor
     {
